@@ -7,14 +7,14 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
-	"time"
+
+	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/lru"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientFake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -25,38 +25,6 @@ import (
 	"github.com/ray-project/kuberay/ray-operator/pkg/client/clientset/versioned/scheme"
 	"github.com/ray-project/kuberay/ray-operator/test/support"
 )
-
-func TestValidateRayServiceSpec(t *testing.T) {
-	err := validateRayServiceSpec(&rayv1.RayService{
-		Spec: rayv1.RayServiceSpec{
-			RayClusterSpec: rayv1.RayClusterSpec{
-				HeadGroupSpec: rayv1.HeadGroupSpec{
-					HeadService: &corev1.Service{
-						ObjectMeta: metav1.ObjectMeta{
-							Name: "my-head-service",
-						},
-					},
-				},
-			},
-		},
-	})
-	assert.Error(t, err, "spec.rayClusterConfig.headGroupSpec.headService.metadata.name should not be set")
-
-	err = validateRayServiceSpec(&rayv1.RayService{
-		Spec: rayv1.RayServiceSpec{},
-	})
-	assert.NoError(t, err, "The RayService spec is valid.")
-
-	var upgradeStrat rayv1.RayServiceUpgradeType = "invalidStrategy"
-	err = validateRayServiceSpec(&rayv1.RayService{
-		Spec: rayv1.RayServiceSpec{
-			UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
-				Type: &upgradeStrat,
-			},
-		},
-	})
-	assert.Error(t, err, "spec.UpgradeSpec.Type is invalid")
-}
 
 func TestGenerateHashWithoutReplicasAndWorkersToDelete(t *testing.T) {
 	// `generateRayClusterJsonHash` will mute fields that will not trigger new RayCluster preparation. For example,
@@ -94,7 +62,6 @@ func TestGenerateHashWithoutReplicasAndWorkersToDelete(t *testing.T) {
 }
 
 func TestDecideClusterAction(t *testing.T) {
-	r := &RayServiceReconciler{}
 	ctx := context.TODO()
 
 	fillAnnotations := func(rayCluster *rayv1.RayCluster) {
@@ -324,29 +291,24 @@ func TestDecideClusterAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			action := r.decideClusterAction(ctx, tt.rayService, tt.activeRayCluster, tt.pendingRayCluster)
+			action := decideClusterAction(ctx, tt.rayService, tt.activeRayCluster, tt.pendingRayCluster)
 			assert.Equal(t, tt.expectedAction, action)
 		})
 	}
 }
 
 func TestInconsistentRayServiceStatuses(t *testing.T) {
-	r := &RayServiceReconciler{}
-
-	timeNow := metav1.Now()
 	oldStatus := rayv1.RayServiceStatuses{
 		ActiveServiceStatus: rayv1.RayServiceStatus{
 			RayClusterName: "new-cluster",
 			Applications: map[string]rayv1.AppStatus{
 				utils.DefaultServeAppName: {
-					Status:               rayv1.ApplicationStatusEnum.RUNNING,
-					Message:              "OK",
-					HealthLastUpdateTime: &timeNow,
+					Status:  rayv1.ApplicationStatusEnum.RUNNING,
+					Message: "OK",
 					Deployments: map[string]rayv1.ServeDeploymentStatus{
 						"serve-1": {
-							Status:               rayv1.DeploymentStatusEnum.UNHEALTHY,
-							Message:              "error",
-							HealthLastUpdateTime: &timeNow,
+							Status:  rayv1.DeploymentStatusEnum.UNHEALTHY,
+							Message: "error",
 						},
 					},
 				},
@@ -356,75 +318,29 @@ func TestInconsistentRayServiceStatuses(t *testing.T) {
 			RayClusterName: "old-cluster",
 			Applications: map[string]rayv1.AppStatus{
 				utils.DefaultServeAppName: {
-					Status:               rayv1.ApplicationStatusEnum.NOT_STARTED,
-					Message:              "application not started yet",
-					HealthLastUpdateTime: &timeNow,
+					Status:  rayv1.ApplicationStatusEnum.NOT_STARTED,
+					Message: "application not started yet",
 					Deployments: map[string]rayv1.ServeDeploymentStatus{
 						"serve-1": {
-							Status:               rayv1.DeploymentStatusEnum.HEALTHY,
-							Message:              "Serve is healthy",
-							HealthLastUpdateTime: &timeNow,
+							Status:  rayv1.DeploymentStatusEnum.HEALTHY,
+							Message: "Serve is healthy",
 						},
 					},
 				},
 			},
 		},
-		ServiceStatus: rayv1.Restarting,
+		ServiceStatus: rayv1.PreparingNewCluster,
 	}
 	ctx := context.Background()
 
 	// Test 1: Update ServiceStatus only.
 	newStatus := oldStatus.DeepCopy()
-	newStatus.ServiceStatus = rayv1.WaitForServeDeploymentReady
-	assert.True(t, r.inconsistentRayServiceStatuses(ctx, oldStatus, *newStatus))
+	newStatus.ServiceStatus = rayv1.Running
+	assert.True(t, inconsistentRayServiceStatuses(ctx, oldStatus, *newStatus))
 
 	// Test 2: Test RayServiceStatus
 	newStatus = oldStatus.DeepCopy()
-	assert.False(t, r.inconsistentRayServiceStatuses(ctx, oldStatus, *newStatus))
-}
-
-func TestInconsistentRayServiceStatus(t *testing.T) {
-	timeNow := metav1.Now()
-	oldStatus := rayv1.RayServiceStatus{
-		RayClusterName: "cluster-1",
-		Applications: map[string]rayv1.AppStatus{
-			"app1": {
-				Status:               rayv1.ApplicationStatusEnum.RUNNING,
-				Message:              "Application is running",
-				HealthLastUpdateTime: &timeNow,
-				Deployments: map[string]rayv1.ServeDeploymentStatus{
-					"serve-1": {
-						Status:               rayv1.DeploymentStatusEnum.HEALTHY,
-						Message:              "Serve is healthy",
-						HealthLastUpdateTime: &timeNow,
-					},
-				},
-			},
-			"app2": {
-				Status:               rayv1.ApplicationStatusEnum.RUNNING,
-				Message:              "Application is running",
-				HealthLastUpdateTime: &timeNow,
-				Deployments: map[string]rayv1.ServeDeploymentStatus{
-					"serve-1": {
-						Status:               rayv1.DeploymentStatusEnum.HEALTHY,
-						Message:              "Serve is healthy",
-						HealthLastUpdateTime: &timeNow,
-					},
-				},
-			},
-		},
-	}
-
-	r := &RayServiceReconciler{}
-	ctx := context.Background()
-
-	// Test 1: Only HealthLastUpdateTime is updated.
-	newStatus := oldStatus.DeepCopy()
-	for appName, application := range newStatus.Applications {
-		application.HealthLastUpdateTime = &metav1.Time{Time: timeNow.Add(1)}
-		newStatus.Applications[appName] = application
-	}
-	assert.False(t, r.inconsistentRayServiceStatus(ctx, oldStatus, *newStatus))
+	assert.False(t, inconsistentRayServiceStatuses(ctx, oldStatus, *newStatus))
 }
 
 func TestIsHeadPodRunningAndReady(t *testing.T) {
@@ -556,7 +472,7 @@ func TestReconcileServices_UpdateService(t *testing.T) {
 
 	ctx := context.TODO()
 	// Create a head service.
-	err := r.reconcileServices(ctx, &rayService, &cluster, utils.HeadService)
+	_, err := r.reconcileServices(ctx, &rayService, &cluster, utils.HeadService)
 	assert.Nil(t, err, "Fail to reconcile service")
 
 	svcList := corev1.ServiceList{}
@@ -572,7 +488,7 @@ func TestReconcileServices_UpdateService(t *testing.T) {
 			ContainerPort: 9999,
 		},
 	}
-	err = r.reconcileServices(ctx, &rayService, &cluster, utils.HeadService)
+	_, err = r.reconcileServices(ctx, &rayService, &cluster, utils.HeadService)
 	assert.Nil(t, err, "Fail to reconcile service")
 
 	svcList = corev1.ServiceList{}
@@ -583,7 +499,7 @@ func TestReconcileServices_UpdateService(t *testing.T) {
 
 	// Test 2: When the RayCluster switches, the service should be updated.
 	cluster.Name = "new-cluster"
-	err = r.reconcileServices(ctx, &rayService, &cluster, utils.HeadService)
+	_, err = r.reconcileServices(ctx, &rayService, &cluster, utils.HeadService)
 	assert.Nil(t, err, "Fail to reconcile service")
 
 	svcList = corev1.ServiceList{}
@@ -649,20 +565,9 @@ func TestGetAndCheckServeStatus(t *testing.T) {
 	_ = rayv1.AddToScheme(newScheme)
 	_ = corev1.AddToScheme(newScheme)
 
-	// Initialize a fake client with newScheme and runtimeObjects.
-	runtimeObjects := []runtime.Object{}
-	fakeClient := clientFake.NewClientBuilder().WithScheme(newScheme).WithRuntimeObjects(runtimeObjects...).Build()
-
 	// Initialize RayService reconciler.
 	ctx := context.TODO()
-	r := RayServiceReconciler{
-		Client:   fakeClient,
-		Recorder: &record.FakeRecorder{},
-		Scheme:   scheme.Scheme,
-	}
 	serveAppName := "serve-app-1"
-	longPeriod := time.Duration(10000)
-	shortPeriod := time.Duration(1)
 
 	// Here are the key representing Ray Serve deployment and application statuses.
 	const (
@@ -686,22 +591,7 @@ func TestGetAndCheckServeStatus(t *testing.T) {
 			applications:  map[string]rayv1.AppStatus{},
 			expectedReady: false,
 		},
-		// Test 2: The Ray Serve application takes a long time to be "RUNNING". This may happen when `runtime_env`
-		// installation takes a long time or the cluster does not have enough resources for autoscaling.
-		"Take a long time to be RUNNING while deploying": {
-			rayServiceStatus: map[string]string{
-				DeploymentStatus:  rayv1.DeploymentStatusEnum.UPDATING,
-				ApplicationStatus: rayv1.ApplicationStatusEnum.DEPLOYING,
-			},
-			applications: map[string]rayv1.AppStatus{
-				serveAppName: {
-					Status:               rayv1.ApplicationStatusEnum.DEPLOYING,
-					HealthLastUpdateTime: &metav1.Time{Time: metav1.Now().Add(-time.Second * longPeriod)},
-				},
-			},
-			expectedReady: false,
-		},
-		// Test 3: The Ray Serve application finishes the deployment process and becomes "RUNNING".
+		// Test 2: The Ray Serve application finishes the deployment process and becomes "RUNNING".
 		"Finishes the deployment process and becomes RUNNING": {
 			rayServiceStatus: map[string]string{
 				DeploymentStatus:  rayv1.DeploymentStatusEnum.HEALTHY,
@@ -709,69 +599,38 @@ func TestGetAndCheckServeStatus(t *testing.T) {
 			},
 			applications: map[string]rayv1.AppStatus{
 				serveAppName: {
-					Status:               rayv1.ApplicationStatusEnum.DEPLOYING,
-					HealthLastUpdateTime: &metav1.Time{Time: metav1.Now().Time},
+					Status: rayv1.ApplicationStatusEnum.RUNNING,
 				},
 			},
 			expectedReady: true,
 		},
-		// Test 4: The Ray Serve application lasts "UNHEALTHY" for a long period.
-		"UNHEALTHY status lasts for a long period": {
+		// Test 3: Both the current Ray Serve application and RayService status are unhealthy.
+		"Both the current Ray Serve application and RayService status are unhealthy": {
 			rayServiceStatus: map[string]string{
 				DeploymentStatus:  rayv1.DeploymentStatusEnum.UNHEALTHY,
 				ApplicationStatus: rayv1.ApplicationStatusEnum.UNHEALTHY,
 			},
 			applications: map[string]rayv1.AppStatus{
 				serveAppName: {
-					Status:               rayv1.ApplicationStatusEnum.UNHEALTHY,
-					HealthLastUpdateTime: &metav1.Time{Time: metav1.Now().Add(-time.Second * longPeriod)},
+					Status: rayv1.ApplicationStatusEnum.UNHEALTHY,
 				},
 			},
 			expectedReady: false,
 		},
-		// Test 5: The Ray Serve application lasts "UNHEALTHY" for a short period.
-		"UNHEALTHY status lasts for a short period": {
-			rayServiceStatus: map[string]string{
-				DeploymentStatus:  rayv1.DeploymentStatusEnum.UNHEALTHY,
-				ApplicationStatus: rayv1.ApplicationStatusEnum.UNHEALTHY,
-			},
-			applications: map[string]rayv1.AppStatus{
-				serveAppName: {
-					Status:               rayv1.ApplicationStatusEnum.UNHEALTHY,
-					HealthLastUpdateTime: &metav1.Time{Time: metav1.Now().Add(-time.Second * shortPeriod)},
-				},
-			},
-			expectedReady: false,
-		},
-		// Test 6: The Ray Serve application lasts "DEPLOY_FAILED" for a long period.
-		"DEPLOY_FAILED status lasts for a long period": {
+		// Test 4: Both the current Ray Serve application and RayService status are DEPLOY_FAILED.
+		"Both the current Ray Serve application and RayService status are DEPLOY_FAILED": {
 			rayServiceStatus: map[string]string{
 				DeploymentStatus:  rayv1.DeploymentStatusEnum.UPDATING,
 				ApplicationStatus: rayv1.ApplicationStatusEnum.DEPLOY_FAILED,
 			},
 			applications: map[string]rayv1.AppStatus{
 				serveAppName: {
-					Status:               rayv1.ApplicationStatusEnum.DEPLOY_FAILED,
-					HealthLastUpdateTime: &metav1.Time{Time: metav1.Now().Add(-time.Second * longPeriod)},
+					Status: rayv1.ApplicationStatusEnum.DEPLOY_FAILED,
 				},
 			},
 			expectedReady: false,
 		},
-		// Test 7: The Ray Serve application lasts "DEPLOY_FAILED" for a short period.
-		"DEPLOY_FAILED status lasts for a short period": {
-			rayServiceStatus: map[string]string{
-				DeploymentStatus:  rayv1.DeploymentStatusEnum.UPDATING,
-				ApplicationStatus: rayv1.ApplicationStatusEnum.DEPLOY_FAILED,
-			},
-			applications: map[string]rayv1.AppStatus{
-				serveAppName: {
-					Status:               rayv1.ApplicationStatusEnum.DEPLOY_FAILED,
-					HealthLastUpdateTime: &metav1.Time{Time: metav1.Now().Add(-time.Second * shortPeriod)},
-				},
-			},
-			expectedReady: false,
-		},
-		// Test 8: If the Ray Serve application is not found, the RayCluster is not ready to serve requests.
+		// Test 5: If the Ray Serve application is not found, the RayCluster is not ready to serve requests.
 		"Ray Serve application is not found": {
 			rayServiceStatus: map[string]string{},
 			applications:     map[string]rayv1.AppStatus{},
@@ -787,97 +646,47 @@ func TestGetAndCheckServeStatus(t *testing.T) {
 			} else {
 				dashboardClient = &utils.FakeRayDashboardClient{}
 			}
-			prevRayServiceStatus := rayv1.RayServiceStatus{Applications: tc.applications}
-			isReady, err := r.getAndCheckServeStatus(ctx, dashboardClient, &prevRayServiceStatus)
+			isReady, _, err := getAndCheckServeStatus(ctx, dashboardClient)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedReady, isReady)
 		})
 	}
 }
 
-func TestCheckIfNeedSubmitServeDeployment(t *testing.T) {
-	// Create a new scheme with CRDs, Pod, Service schemes.
-	newScheme := runtime.NewScheme()
-	_ = rayv1.AddToScheme(newScheme)
-	_ = corev1.AddToScheme(newScheme)
+func TestCheckIfNeedSubmitServeApplications(t *testing.T) {
+	serveConfigV2_1 := "serve-config-1"
+	serveConfigV2_2 := "serve-config-2"
 
-	// Initialize a fake client with newScheme and runtimeObjects.
-	runtimeObjects := []runtime.Object{}
-	fakeClient := clientFake.NewClientBuilder().WithScheme(newScheme).WithRuntimeObjects(runtimeObjects...).Build()
-
-	// Initialize RayService reconciler.
-	r := RayServiceReconciler{
-		Client:       fakeClient,
-		Recorder:     &record.FakeRecorder{},
-		Scheme:       scheme.Scheme,
-		ServeConfigs: lru.New(utils.ServeConfigLRUSize),
-	}
-
-	namespace := "ray"
-	cluster := rayv1.RayCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cluster",
-			Namespace: namespace,
+	serveApplications := map[string]rayv1.AppStatus{
+		"myapp": {
+			Status: rayv1.ApplicationStatusEnum.RUNNING,
 		},
 	}
-	rayService := rayv1.RayService{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-service",
-			Namespace: cluster.ObjectMeta.Namespace,
-		},
-		Spec: rayv1.RayServiceSpec{
-			ServeConfigV2: `
-applications:
-- name: myapp
-  import_path: fruit.deployment_graph
-  runtime_env:
-  working_dir: "https://github.com/ray-project/test_dag/archive/41d09119cbdf8450599f993f51318e9e27c59098.zip"
-  deployments:
-  - name: MangoStand
-	num_replicas: 1
-	user_config:
-	price: 3
-	ray_actor_options:
-	num_cpus: 0.1`,
-		},
-	}
-	ctx := context.Background()
+	emptyServeApplications := map[string]rayv1.AppStatus{}
 
-	// Test 1: The RayCluster is new, and this is the first reconciliation after the RayCluster becomes ready.
-	// No Serve application has been created yet, so the RayService's serve configuration has not been cached in
-	// `r.ServeConfigs`.
-	serveConfig := r.getServeConfigFromCache(&rayService, cluster.Name)
-	assert.Empty(t, serveConfig)
-	shouldCreate := r.checkIfNeedSubmitServeDeployment(ctx, &rayService, &cluster, &rayv1.RayServiceStatus{})
+	// Test 1: The cached Serve config is empty, and the new Serve config is not empty.
+	// This happens when the RayCluster is new, and the serve application has not been created yet.
+	shouldCreate, _ := checkIfNeedSubmitServeApplications("", serveConfigV2_1, emptyServeApplications)
 	assert.True(t, shouldCreate)
 
-	// Test 2: The RayCluster is not new, but the head Pod without GCS FT-enabled crashes and restarts.
-	// Hence, the RayService's Serve application status is empty, but the KubeRay operator has cached the Serve
-	// application's configuration.
-	r.cacheServeConfig(&rayService, cluster.Name) // Simulate the Serve application's configuration has been cached.
-	shouldCreate = r.checkIfNeedSubmitServeDeployment(ctx, &rayService, &cluster, &rayv1.RayServiceStatus{})
-	assert.True(t, shouldCreate)
-
-	// Test 3: The Serve application has been created, and the RayService's status has been updated.
-	serveConfig = r.getServeConfigFromCache(&rayService, cluster.Name)
-	assert.NotEmpty(t, serveConfig)
-	serveStatus := rayv1.RayServiceStatus{
-		Applications: map[string]rayv1.AppStatus{
-			"myapp": {
-				Status: rayv1.ApplicationStatusEnum.RUNNING,
-			},
-		},
-	}
-	shouldCreate = r.checkIfNeedSubmitServeDeployment(ctx, &rayService, &cluster, &serveStatus)
+	// Test 2: The cached Serve config and the new Serve config are the same.
+	// This happens when the serve application is already created, and users do not update the serve config.
+	shouldCreate, _ = checkIfNeedSubmitServeApplications(serveConfigV2_1, serveConfigV2_1, serveApplications)
 	assert.False(t, shouldCreate)
 
-	// Test 4: The Serve application has been created, but the Serve config has been updated.
-	// Therefore, the Serve in-place update should be triggered.
-	rayService.Spec.ServeConfigV2 = `
-applications:
-- name: new_app_name
-  import_path: fruit.deployment_graph`
-	shouldCreate = r.checkIfNeedSubmitServeDeployment(ctx, &rayService, &cluster, &serveStatus)
+	// Test 3: The cached Serve config and the new Serve config are different.
+	// This happens when the serve application is already created, and users update the serve config.
+	shouldCreate, _ = checkIfNeedSubmitServeApplications(serveConfigV2_1, serveConfigV2_2, serveApplications)
+	assert.True(t, shouldCreate)
+
+	// Test 4: Both the cached Serve config and the new Serve config are the same, but the RayService CR status is empty.
+	// This happens when the head Pod crashed and GCS FT was not enabled
+	shouldCreate, _ = checkIfNeedSubmitServeApplications(serveConfigV2_1, serveConfigV2_1, emptyServeApplications)
+	assert.True(t, shouldCreate)
+
+	// Test 5: The cached Serve config is empty, but the new Serve config is not empty.
+	// This happens when KubeRay operator crashes and restarts. Submit the request for safety.
+	shouldCreate, _ = checkIfNeedSubmitServeApplications("", serveConfigV2_1, serveApplications)
 	assert.True(t, shouldCreate)
 }
 
@@ -1144,12 +953,263 @@ func TestLabelHeadPodForServeStatus(t *testing.T) {
 				},
 			}
 
-			err := r.labelHeadPodForServeStatus(ctx, &cluster, tc.excludeHeadPodFromServeSvc)
+			err := r.updateHeadPodServeLabel(ctx, &cluster, tc.excludeHeadPodFromServeSvc)
 			assert.NoError(t, err)
 			// Get latest headPod status
 			headPod, err = common.GetRayClusterHeadPod(ctx, r, &cluster)
 			assert.Equal(t, headPod.Labels[utils.RayClusterServingServiceLabelKey], tc.expectServeResult)
 			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestCalculateConditions(t *testing.T) {
+	tests := []struct {
+		name                    string
+		conditionType           rayv1.RayServiceConditionType
+		originalConditionStatus metav1.ConditionStatus
+		originalReason          string
+		expectedConditionStatus metav1.ConditionStatus
+		expectedReason          string
+		rayServiceInstance      rayv1.RayService
+	}{
+		{
+			name: "Ready condition remains false unchanged",
+			rayServiceInstance: rayv1.RayService{
+				Status: rayv1.RayServiceStatuses{
+					NumServeEndpoints: 0,
+				},
+			},
+			conditionType:           rayv1.RayServiceReady,
+			originalConditionStatus: metav1.ConditionFalse,
+			originalReason:          "WhateverReason",
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          "WhateverReason",
+		},
+		{
+			name: "Ready condition remains true always has NonZeroServeEndPoints reason",
+			rayServiceInstance: rayv1.RayService{
+				Status: rayv1.RayServiceStatuses{
+					NumServeEndpoints: 1,
+				},
+			},
+			conditionType:           rayv1.RayServiceReady,
+			originalConditionStatus: metav1.ConditionTrue,
+			originalReason:          "WhateverReason",
+			expectedConditionStatus: metav1.ConditionTrue,
+			expectedReason:          string(rayv1.NonZeroServeEndpoints),
+		},
+		{
+			name: "Ready condition becomes true",
+			rayServiceInstance: rayv1.RayService{
+				Status: rayv1.RayServiceStatuses{
+					NumServeEndpoints: 1,
+				},
+			},
+			conditionType:           rayv1.RayServiceReady,
+			originalConditionStatus: metav1.ConditionFalse,
+			originalReason:          "WhateverReason",
+			expectedConditionStatus: metav1.ConditionTrue,
+			expectedReason:          string(rayv1.NonZeroServeEndpoints),
+		},
+		{
+			name: "Ready condition becomes false",
+			rayServiceInstance: rayv1.RayService{
+				Status: rayv1.RayServiceStatuses{
+					NumServeEndpoints: 0,
+				},
+			},
+			conditionType:           rayv1.RayServiceReady,
+			originalConditionStatus: metav1.ConditionTrue,
+			originalReason:          string(rayv1.NonZeroServeEndpoints),
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          string(rayv1.ZeroServeEndpoints),
+		},
+		{
+			name: "UpgradeInProgress condition is true if both active and pending clusters exist",
+			rayServiceInstance: rayv1.RayService{
+				Status: rayv1.RayServiceStatuses{
+					ActiveServiceStatus: rayv1.RayServiceStatus{
+						RayClusterName: "active-cluster",
+					},
+					PendingServiceStatus: rayv1.RayServiceStatus{
+						RayClusterName: "pending-cluster",
+					},
+				},
+			},
+			conditionType:           rayv1.UpgradeInProgress,
+			originalConditionStatus: metav1.ConditionFalse,
+			originalReason:          "WhateverReason",
+			expectedConditionStatus: metav1.ConditionTrue,
+			expectedReason:          string(rayv1.BothActivePendingClustersExist),
+		},
+		{
+			name: "UpgradeInProgress condition is false if only active cluster exists",
+			rayServiceInstance: rayv1.RayService{
+				Status: rayv1.RayServiceStatuses{
+					ActiveServiceStatus: rayv1.RayServiceStatus{
+						RayClusterName: "active-cluster",
+					},
+				},
+			},
+			conditionType:           rayv1.UpgradeInProgress,
+			originalConditionStatus: metav1.ConditionTrue,
+			originalReason:          string(rayv1.BothActivePendingClustersExist),
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          string(rayv1.NoPendingCluster),
+		},
+		{
+			name:                    "UpgradeInProgress condition is unknown if no active cluster exists and RayService is not initializing",
+			rayServiceInstance:      rayv1.RayService{},
+			conditionType:           rayv1.UpgradeInProgress,
+			originalConditionStatus: metav1.ConditionTrue,
+			originalReason:          string(rayv1.BothActivePendingClustersExist),
+			expectedConditionStatus: metav1.ConditionUnknown,
+			expectedReason:          string(rayv1.NoActiveCluster),
+		},
+		{
+			name: "UpgradeInProgress condition is false if RayService is initializing",
+			rayServiceInstance: rayv1.RayService{
+				Status: rayv1.RayServiceStatuses{
+					PendingServiceStatus: rayv1.RayServiceStatus{
+						RayClusterName: "pending-cluster",
+					},
+				},
+			},
+			conditionType:           rayv1.UpgradeInProgress,
+			originalConditionStatus: metav1.ConditionFalse,
+			originalReason:          string(rayv1.RayServiceInitializing),
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          string(rayv1.RayServiceInitializing),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initConditions(&tt.rayServiceInstance)
+			meta.SetStatusCondition(&tt.rayServiceInstance.Status.Conditions, metav1.Condition{
+				Type:   string(tt.conditionType),
+				Status: tt.originalConditionStatus,
+				Reason: tt.originalReason,
+			})
+			calculateConditions(&tt.rayServiceInstance)
+			condition := meta.FindStatusCondition(tt.rayServiceInstance.Status.Conditions, string(tt.conditionType))
+			assert.Equal(t, tt.expectedConditionStatus, condition.Status)
+			assert.Equal(t, tt.expectedReason, condition.Reason)
+		})
+	}
+}
+
+func TestConstructRayClusterForRayService(t *testing.T) {
+	tests := []struct {
+		name       string
+		rayService rayv1.RayService
+	}{
+		{
+			name: "RayClusterSpec with no worker groups",
+			rayService: rayv1.RayService{
+				Spec: rayv1.RayServiceSpec{
+					RayClusterSpec: rayv1.RayClusterSpec{
+						WorkerGroupSpecs: []rayv1.WorkerGroupSpec{},
+					},
+				},
+			},
+		},
+		{
+			name: "RayClusterSpec with two worker groups",
+			rayService: rayv1.RayService{
+				Spec: rayv1.RayServiceSpec{
+					RayClusterSpec: rayv1.RayClusterSpec{
+						WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+							{
+								GroupName: "worker-group-1",
+							},
+							{
+								GroupName: "worker-group-2",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "RayService with labels",
+			rayService: rayv1.RayService{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"label-1": "value-1",
+						"label-2": "value-2",
+					},
+				},
+				Spec: rayv1.RayServiceSpec{
+					RayClusterSpec: rayv1.RayClusterSpec{
+						WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+							{
+								GroupName: "worker-group-1",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "RayService with annotations",
+			rayService: rayv1.RayService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"annotation-1": "value-1",
+						"annotation-2": "value-2",
+					},
+				},
+				Spec: rayv1.RayServiceSpec{
+					RayClusterSpec: rayv1.RayClusterSpec{
+						WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+							{
+								GroupName: "worker-group-1",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rayService := tt.rayService
+			rayService.Name = "test-service"
+			rayService.Namespace = "test-namespace"
+			clusterName := "test-cluster"
+			rayCluster, err := constructRayClusterForRayService(&rayService, clusterName, scheme.Scheme)
+			assert.NoError(t, err)
+
+			// Check ObjectMeta of the RayCluster
+			assert.Equal(t, rayCluster.ObjectMeta.Name, clusterName)
+			assert.Equal(t, rayCluster.ObjectMeta.Namespace, rayService.Namespace)
+
+			// Check labels for metadata
+			assert.Equal(t, rayCluster.Labels[utils.RayOriginatedFromCRNameLabelKey], rayService.Name)
+			assert.Equal(t, rayCluster.Labels[utils.RayOriginatedFromCRDLabelKey], string(utils.RayServiceCRD))
+
+			// Check annotations for metadata
+			assert.NotEmpty(t, rayCluster.Annotations[utils.HashWithoutReplicasAndWorkersToDeleteKey])
+			expectedNumWorkerGroups := strconv.Itoa(len(rayService.Spec.RayClusterSpec.WorkerGroupSpecs))
+			assert.Equal(t, rayCluster.Annotations[utils.NumWorkerGroupsKey], expectedNumWorkerGroups)
+			assert.Equal(t, rayCluster.Annotations[utils.KubeRayVersion], utils.KUBERAY_VERSION)
+
+			// Check whether the RayService's labels are copied to the RayCluster
+			for key, value := range rayService.Labels {
+				assert.Equal(t, rayCluster.Labels[key], value)
+			}
+
+			// Check whether the RayService's annotations are copied to the RayCluster
+			for key, value := range rayService.Annotations {
+				assert.Equal(t, rayCluster.Annotations[key], value)
+			}
+
+			// Check owner reference
+			assert.Equal(t, rayCluster.OwnerReferences[0].Name, rayService.Name)
+			assert.Equal(t, rayCluster.OwnerReferences[0].UID, rayService.UID)
 		})
 	}
 }

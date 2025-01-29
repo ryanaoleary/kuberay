@@ -11,9 +11,8 @@ import (
 type ServiceStatus string
 
 const (
-	WaitForServeDeploymentReady ServiceStatus = "WaitForServeDeploymentReady"
-	Running                     ServiceStatus = "Running"
-	Restarting                  ServiceStatus = "Restarting"
+	Running             ServiceStatus = "Running"
+	PreparingNewCluster ServiceStatus = "PreparingNewCluster"
 )
 
 // These statuses should match Ray Serve's application statuses

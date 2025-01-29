@@ -22,9 +22,9 @@ type CreateClusterOptions struct {
 	image          string
 	headCPU        string
 	headMemory     string
-	workerGrpName  string
 	workerCPU      string
 	workerMemory   string
+	workerGPU      string
 	workerReplicas int32
 	dryRun         bool
 }
@@ -35,8 +35,11 @@ var (
 	`)
 
 	createClusterExample = templates.Examples(`
+		# Create a Ray cluster using default values
+		kubectl ray create cluster sample-cluster
+
 		# Creates Ray Cluster from flags input
-		kubectl ray create cluster sample-cluster --ray-version 2.39.0 --image rayproject/ray:2.39.0 --head-cpu 1 --head-memory 5Gi --worker-grp-name worker-group1 --worker-replicas 3 --worker-cpu 1 --worker-memory 5Gi
+		kubectl ray create cluster sample-cluster --ray-version 2.39.0 --image rayproject/ray:2.39.0 --head-cpu 1 --head-memory 5Gi --worker-replicas 3 --worker-cpu 1 --worker-memory 5Gi
 	`)
 )
 
@@ -72,10 +75,10 @@ func NewCreateClusterCommand(streams genericclioptions.IOStreams) *cobra.Command
 	cmd.Flags().StringVar(&options.image, "image", options.image, "Ray image to use in the Ray Cluster yaml")
 	cmd.Flags().StringVar(&options.headCPU, "head-cpu", "2", "Number of CPU for the ray head. Default to 2")
 	cmd.Flags().StringVar(&options.headMemory, "head-memory", "4Gi", "Amount of memory to use for the ray head. Default to 4Gi")
-	cmd.Flags().StringVar(&options.workerGrpName, "worker-grp-name", "default-group", "Name of the worker group for the Ray Cluster")
 	cmd.Flags().Int32Var(&options.workerReplicas, "worker-replicas", 1, "Number of the worker group replicas. Default of 1")
 	cmd.Flags().StringVar(&options.workerCPU, "worker-cpu", "2", "Number of CPU for the ray worker. Default to 2")
 	cmd.Flags().StringVar(&options.workerMemory, "worker-memory", "4Gi", "Amount of memory to use for the ray worker. Default to 4Gi")
+	cmd.Flags().StringVar(&options.workerGPU, "worker-gpu", "0", "Number of GPU for the ray worker. Default to 0")
 	cmd.Flags().BoolVar(&options.dryRun, "dry-run", false, "Will not apply the generated cluster and will print out the generated yaml")
 
 	options.configFlags.AddFlags(cmd.Flags())
@@ -126,10 +129,10 @@ func (options *CreateClusterOptions) Run(ctx context.Context, factory cmdutil.Fa
 			Image:          options.image,
 			HeadCPU:        options.headCPU,
 			HeadMemory:     options.headMemory,
-			WorkerGrpName:  options.workerGrpName,
 			WorkerReplicas: options.workerReplicas,
 			WorkerCPU:      options.workerCPU,
 			WorkerMemory:   options.workerMemory,
+			WorkerGPU:      options.workerGPU,
 		},
 	}
 

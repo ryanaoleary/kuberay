@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
@@ -19,10 +20,10 @@ func TestGenerateRayCluterApplyConfig(t *testing.T) {
 			Image:          "rayproject/ray:2.39.0",
 			HeadCPU:        "1",
 			HeadMemory:     "5Gi",
-			WorkerGrpName:  "worker-group1",
 			WorkerReplicas: 3,
 			WorkerCPU:      "2",
 			WorkerMemory:   "10Gi",
+			WorkerGPU:      "1",
 		},
 	}
 
@@ -34,9 +35,10 @@ func TestGenerateRayCluterApplyConfig(t *testing.T) {
 	assert.Equal(t, testRayClusterYamlObject.Image, *result.Spec.HeadGroupSpec.Template.Spec.Containers[0].Image)
 	assert.Equal(t, resource.MustParse(testRayClusterYamlObject.HeadCPU), *result.Spec.HeadGroupSpec.Template.Spec.Containers[0].Resources.Requests.Cpu())
 	assert.Equal(t, resource.MustParse(testRayClusterYamlObject.HeadMemory), *result.Spec.HeadGroupSpec.Template.Spec.Containers[0].Resources.Requests.Memory())
-	assert.Equal(t, testRayClusterYamlObject.WorkerGrpName, *result.Spec.WorkerGroupSpecs[0].GroupName)
+	assert.Equal(t, "default-group", *result.Spec.WorkerGroupSpecs[0].GroupName)
 	assert.Equal(t, testRayClusterYamlObject.WorkerReplicas, *result.Spec.WorkerGroupSpecs[0].Replicas)
 	assert.Equal(t, resource.MustParse(testRayClusterYamlObject.WorkerCPU), *result.Spec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Requests.Cpu())
+	assert.Equal(t, resource.MustParse(testRayClusterYamlObject.WorkerGPU), *result.Spec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Requests.Name(corev1.ResourceName("nvidia.com/gpu"), resource.DecimalSI))
 	assert.Equal(t, resource.MustParse(testRayClusterYamlObject.WorkerMemory), *result.Spec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Requests.Memory())
 }
 
@@ -50,10 +52,10 @@ func TestGenerateRayJobApplyConfig(t *testing.T) {
 			Image:          "rayproject/ray:2.39.0",
 			HeadCPU:        "1",
 			HeadMemory:     "5Gi",
-			WorkerGrpName:  "worker-group1",
 			WorkerReplicas: 3,
 			WorkerCPU:      "2",
 			WorkerMemory:   "10Gi",
+			WorkerGPU:      "0",
 		},
 	}
 
@@ -66,7 +68,7 @@ func TestGenerateRayJobApplyConfig(t *testing.T) {
 	assert.Equal(t, testRayJobYamlObject.Image, *result.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Containers[0].Image)
 	assert.Equal(t, resource.MustParse(testRayJobYamlObject.HeadCPU), *result.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Containers[0].Resources.Requests.Cpu())
 	assert.Equal(t, resource.MustParse(testRayJobYamlObject.HeadMemory), *result.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Containers[0].Resources.Requests.Memory())
-	assert.Equal(t, testRayJobYamlObject.WorkerGrpName, *result.Spec.RayClusterSpec.WorkerGroupSpecs[0].GroupName)
+	assert.Equal(t, "default-group", *result.Spec.RayClusterSpec.WorkerGroupSpecs[0].GroupName)
 	assert.Equal(t, testRayJobYamlObject.WorkerReplicas, *result.Spec.RayClusterSpec.WorkerGroupSpecs[0].Replicas)
 	assert.Equal(t, resource.MustParse(testRayJobYamlObject.WorkerCPU), *result.Spec.RayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Requests.Cpu())
 	assert.Equal(t, resource.MustParse(testRayJobYamlObject.WorkerMemory), *result.Spec.RayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Requests.Memory())
@@ -81,10 +83,10 @@ func TestConvertRayClusterApplyConfigToYaml(t *testing.T) {
 			Image:          "rayproject/ray:2.39.0",
 			HeadCPU:        "1",
 			HeadMemory:     "5Gi",
-			WorkerGrpName:  "worker-group1",
 			WorkerReplicas: 3,
 			WorkerCPU:      "2",
 			WorkerMemory:   "10Gi",
+			WorkerGPU:      "0",
 		},
 	}
 
@@ -122,7 +124,7 @@ spec:
               memory: 5Gi
   rayVersion: 2.39.0
   workerGroupSpecs:
-  - groupName: worker-group1
+  - groupName: default-group
     rayStartParams:
       metrics-export-port: "8080"
     replicas: 3

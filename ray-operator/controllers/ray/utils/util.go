@@ -322,6 +322,9 @@ func GetWorkerGroupDesiredReplicas(ctx context.Context, workerGroupSpec rayv1.Wo
 	log := ctrl.LoggerFrom(ctx)
 	// Always adhere to min/max replicas constraints.
 	var workerReplicas int32
+	if workerGroupSpec.Suspend != nil && *workerGroupSpec.Suspend {
+		return 0
+	}
 	if *workerGroupSpec.MinReplicas > *workerGroupSpec.MaxReplicas {
 		log.Info("minReplicas is greater than maxReplicas, using maxReplicas as desired replicas. "+
 			"Please fix this to avoid any unexpected behaviors.", "minReplicas", *workerGroupSpec.MinReplicas, "maxReplicas", *workerGroupSpec.MaxReplicas)
@@ -352,6 +355,9 @@ func CalculateDesiredReplicas(ctx context.Context, cluster *rayv1.RayCluster) in
 func CalculateMinReplicas(cluster *rayv1.RayCluster) int32 {
 	count := int32(0)
 	for _, nodeGroup := range cluster.Spec.WorkerGroupSpecs {
+		if nodeGroup.Suspend != nil && *nodeGroup.Suspend {
+			continue
+		}
 		count += *nodeGroup.MinReplicas
 	}
 
@@ -362,6 +368,9 @@ func CalculateMinReplicas(cluster *rayv1.RayCluster) int32 {
 func CalculateMaxReplicas(cluster *rayv1.RayCluster) int32 {
 	count := int32(0)
 	for _, nodeGroup := range cluster.Spec.WorkerGroupSpecs {
+		if nodeGroup.Suspend != nil && *nodeGroup.Suspend {
+			continue
+		}
 		count += *nodeGroup.MaxReplicas
 	}
 
@@ -405,6 +414,9 @@ func CalculateDesiredResources(cluster *rayv1.RayCluster) corev1.ResourceList {
 	headPodResource := CalculatePodResource(cluster.Spec.HeadGroupSpec.Template.Spec)
 	desiredResourcesList = append(desiredResourcesList, headPodResource)
 	for _, nodeGroup := range cluster.Spec.WorkerGroupSpecs {
+		if nodeGroup.Suspend != nil && *nodeGroup.Suspend {
+			continue
+		}
 		podResource := CalculatePodResource(nodeGroup.Template.Spec)
 		for i := int32(0); i < *nodeGroup.Replicas; i++ {
 			desiredResourcesList = append(desiredResourcesList, podResource)
@@ -586,21 +598,6 @@ func EnvVarExists(envName string, envVars []corev1.EnvVar) bool {
 	return false
 }
 
-func UpsertEnvVar(envVars []corev1.EnvVar, newEnvVar corev1.EnvVar) []corev1.EnvVar {
-	overridden := false
-	// override EVERY env vars with the same name.
-	for i, env := range envVars {
-		if env.Name == newEnvVar.Name {
-			envVars[i] = newEnvVar
-			overridden = true
-		}
-	}
-	if !overridden {
-		envVars = append(envVars, newEnvVar)
-	}
-	return envVars
-}
-
 // EnvVarByName returns an entry in []corev1.EnvVar that matches a name.
 // Also returns a bool for whether the env var exists.
 func EnvVarByName(envName string, envVars []corev1.EnvVar) (corev1.EnvVar, bool) {
@@ -622,4 +619,31 @@ func ManagedByExternalController(controllerName *string) *string {
 		return controllerName
 	}
 	return nil
+}
+
+func IsAutoscalingEnabled[T *rayv1.RayCluster | *rayv1.RayJob | *rayv1.RayService](obj T) bool {
+	switch obj := (interface{})(obj).(type) {
+	case *rayv1.RayCluster:
+		return obj.Spec.EnableInTreeAutoscaling != nil && *obj.Spec.EnableInTreeAutoscaling
+	case *rayv1.RayJob:
+		return obj.Spec.RayClusterSpec != nil && obj.Spec.RayClusterSpec.EnableInTreeAutoscaling != nil && *obj.Spec.RayClusterSpec.EnableInTreeAutoscaling
+	case *rayv1.RayService:
+		return obj.Spec.RayClusterSpec.EnableInTreeAutoscaling != nil && *obj.Spec.RayClusterSpec.EnableInTreeAutoscaling
+	default:
+		panic(fmt.Sprintf("unsupported type: %T", obj))
+	}
+}
+
+// Check if the RayCluster has GCS fault tolerance enabled.
+func IsGCSFaultToleranceEnabled(instance rayv1.RayCluster) bool {
+	v, ok := instance.Annotations[RayFTEnabledAnnotationKey]
+	return (ok && strings.ToLower(v) == "true") || instance.Spec.GcsFaultToleranceOptions != nil
+}
+
+// GetRayClusterNameFromService returns the name of the RayCluster that the service points to
+func GetRayClusterNameFromService(svc *corev1.Service) string {
+	if svc == nil || svc.Spec.Selector == nil {
+		return ""
+	}
+	return svc.Spec.Selector[RayClusterLabelKey]
 }

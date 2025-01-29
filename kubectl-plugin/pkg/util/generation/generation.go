@@ -13,16 +13,14 @@ import (
 )
 
 type RayClusterSpecObject struct {
-	RayVersion                       string
-	Image                            string
-	HeadCPU                          string
-	HeadMemory                       string
-	WorkerGrpName                    string
-	WorkerCPU                        string
-	WorkerMemory                     string
-	HeadLifecyclePrestopExecCommand  []string
-	WorkerLifecyclePrestopExecComand []string
-	WorkerReplicas                   int32
+	RayVersion     string
+	Image          string
+	HeadCPU        string
+	HeadMemory     string
+	WorkerCPU      string
+	WorkerGPU      string
+	WorkerMemory   string
+	WorkerReplicas int32
 }
 
 type RayClusterYamlObject struct {
@@ -81,7 +79,7 @@ func (rayClusterSpecObject *RayClusterSpecObject) generateRayClusterSpec() *rayv
 							corev1ac.ContainerPort().WithContainerPort(10001).WithName("client")))))).
 		WithWorkerGroupSpecs(rayv1ac.WorkerGroupSpec().
 			WithRayStartParams(map[string]string{"metrics-export-port": "8080"}).
-			WithGroupName(rayClusterSpecObject.WorkerGrpName).
+			WithGroupName("default-group").
 			WithReplicas(rayClusterSpecObject.WorkerReplicas).
 			WithTemplate(corev1ac.PodTemplateSpec().
 				WithSpec(corev1ac.PodSpec().
@@ -98,19 +96,18 @@ func (rayClusterSpecObject *RayClusterSpecObject) generateRayClusterSpec() *rayv
 								corev1.ResourceMemory: resource.MustParse(rayClusterSpecObject.WorkerMemory),
 							}))))))
 
-	// Lifecycle cannot be empty, an empty lifecycle will stop pod startup so this will add lifecycle if its not empty
-	if len(rayClusterSpecObject.WorkerLifecyclePrestopExecComand) > 0 {
-		rayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Lifecycle = corev1ac.Lifecycle().
-			WithPreStop(corev1ac.LifecycleHandler().
-				WithExec(corev1ac.ExecAction().
-					WithCommand(rayClusterSpecObject.WorkerLifecyclePrestopExecComand...)))
+	gpuResource := resource.MustParse(rayClusterSpecObject.WorkerGPU)
+	if !gpuResource.IsZero() {
+		var requests, limits corev1.ResourceList
+		requests = *rayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Requests
+		limits = *rayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Limits
+		requests[corev1.ResourceName("nvidia.com/gpu")] = gpuResource
+		limits[corev1.ResourceName("nvidia.com/gpu")] = gpuResource
+
+		rayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Requests = &requests
+		rayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Resources.Limits = &limits
 	}
-	if len(rayClusterSpecObject.HeadLifecyclePrestopExecCommand) > 0 {
-		rayClusterSpec.HeadGroupSpec.Template.Spec.Containers[0].Lifecycle = corev1ac.Lifecycle().
-			WithPreStop(corev1ac.LifecycleHandler().
-				WithExec(corev1ac.ExecAction().
-					WithCommand(rayClusterSpecObject.HeadLifecyclePrestopExecCommand...)))
-	}
+
 	return rayClusterSpec
 }
 

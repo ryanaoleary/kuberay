@@ -63,18 +63,15 @@ const (
 	DashSymbol = "-"
 
 	// Use as default port
-	DefaultClientPort = 10001
-	// For Ray >= 1.11.0, "DefaultRedisPort" actually refers to the GCS server port.
-	// However, the role of this port is unchanged in Ray APIs like ray.init and ray start.
-	// This is the port used by Ray workers and drivers inside the Ray cluster to connect to the Ray head.
-	DefaultRedisPort                = 6379
+	DefaultClientPort               = 10001
+	DefaultGcsServerPort            = 6379
 	DefaultDashboardPort            = 8265
 	DefaultMetricsPort              = 8080
 	DefaultDashboardAgentListenPort = 52365
 	DefaultServingPort              = 8000
 
 	ClientPortName    = "client"
-	RedisPortName     = "redis"
+	GcsServerPortName = "gcs-server"
 	DashboardPortName = "dashboard"
 	MetricsPortName   = "metrics"
 	ServingPortName   = "serve"
@@ -100,6 +97,7 @@ const (
 	RAY_ADDRESS                             = "RAY_ADDRESS"
 	RAY_REDIS_ADDRESS                       = "RAY_REDIS_ADDRESS"
 	REDIS_PASSWORD                          = "REDIS_PASSWORD"
+	REDIS_USERNAME                          = "REDIS_USERNAME"
 	RAY_DASHBOARD_ENABLE_K8S_DISK_USAGE     = "RAY_DASHBOARD_ENABLE_K8S_DISK_USAGE"
 	RAY_EXTERNAL_STORAGE_NS                 = "RAY_external_storage_namespace"
 	RAY_GCS_RPC_SERVER_RECONNECT_TIMEOUT_S  = "RAY_gcs_rpc_server_reconnect_timeout_s"
@@ -240,6 +238,7 @@ type K8sEventType string
 const (
 	// RayCluster event list
 	InvalidRayClusterStatus K8sEventType = "InvalidRayClusterStatus"
+	InvalidRayClusterSpec   K8sEventType = "InvalidRayClusterSpec"
 	// Head Pod event list
 	CreatedHeadPod        K8sEventType = "CreatedHeadPod"
 	FailedToCreateHeadPod K8sEventType = "FailedToCreateHeadPod"
@@ -265,9 +264,11 @@ const (
 	FailedToCreateRayJobSubmitter K8sEventType = "FailedToCreateRayJobSubmitter"
 	FailedToDeleteRayJobSubmitter K8sEventType = "FailedToDeleteRayJobSubmitter"
 	CreatedRayCluster             K8sEventType = "CreatedRayCluster"
+	UpdatedRayCluster             K8sEventType = "UpdatedRayCluster"
 	DeletedRayCluster             K8sEventType = "DeletedRayCluster"
 	FailedToCreateRayCluster      K8sEventType = "FailedToCreateRayCluster"
 	FailedToDeleteRayCluster      K8sEventType = "FailedToDeleteRayCluster"
+	FailedToUpdateRayCluster      K8sEventType = "FailedToUpdateRayCluster"
 
 	// RayService event list
 	InvalidRayServiceSpec K8sEventType = "InvalidRayServiceSpec"

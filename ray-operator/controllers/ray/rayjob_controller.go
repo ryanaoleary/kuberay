@@ -19,6 +19,7 @@ import (
 
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/common"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
+	"github.com/ray-project/kuberay/ray-operator/pkg/features"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -109,34 +110,31 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 			}
 
 			rayDashboardClient := r.dashboardClientFunc()
-			err = rayDashboardClient.InitClient(ctx, rayJobInstance.Status.DashboardURL, rayClusterInstance)
-			if err != nil {
+			if err := rayDashboardClient.InitClient(ctx, rayJobInstance.Status.DashboardURL, rayClusterInstance); err != nil {
 				logger.Error(err, "Failed to initialize dashboard client")
 			}
-			err = rayDashboardClient.StopJob(ctx, rayJobInstance.Status.JobId)
-			if err != nil {
+			if err := rayDashboardClient.StopJob(ctx, rayJobInstance.Status.JobId); err != nil {
 				logger.Error(err, "Failed to stop job for RayJob")
 			}
 		}
 
 		logger.Info("Remove the finalizer no matter StopJob() succeeds or not.", "finalizer", utils.RayJobStopJobFinalizer)
 		controllerutil.RemoveFinalizer(rayJobInstance, utils.RayJobStopJobFinalizer)
-		err := r.Update(ctx, rayJobInstance)
-		if err != nil {
+		if err := r.Update(ctx, rayJobInstance); err != nil {
 			logger.Error(err, "Failed to remove finalizer for RayJob")
 			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 		}
 		return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 	}
 
-	if err := validateRayJobSpec(rayJobInstance); err != nil {
+	if err := utils.ValidateRayJobSpec(rayJobInstance); err != nil {
 		logger.Error(err, "The RayJob spec is invalid")
 		r.Recorder.Eventf(rayJobInstance, corev1.EventTypeWarning, string(utils.InvalidRayJobSpec),
 			"The RayJob spec is invalid %s/%s: %v", rayJobInstance.Namespace, rayJobInstance.Name, err)
 		return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 	}
 
-	if err := validateRayJobStatus(rayJobInstance); err != nil {
+	if err := utils.ValidateRayJobStatus(rayJobInstance); err != nil {
 		logger.Error(err, "The RayJob status is invalid")
 		r.Recorder.Eventf(rayJobInstance, corev1.EventTypeWarning, string(utils.InvalidRayJobStatus),
 			"The RayJob status is invalid %s/%s: %v", rayJobInstance.Namespace, rayJobInstance.Name, err)
@@ -160,15 +158,15 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 		// Set `Status.JobDeploymentStatus` to `JobDeploymentStatusInitializing`, and initialize `Status.JobId`
 		// and `Status.RayClusterName` prior to avoid duplicate job submissions and cluster creations.
 		logger.Info("JobDeploymentStatusNew")
-		if err = r.initRayJobStatusIfNeed(ctx, rayJobInstance); err != nil {
+		if err = initRayJobStatusIfNeed(ctx, rayJobInstance); err != nil {
 			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 		}
 	case rayv1.JobDeploymentStatusInitializing:
-		if shouldUpdate := r.updateStatusToSuspendingIfNeeded(ctx, rayJobInstance); shouldUpdate {
+		if shouldUpdate := updateStatusToSuspendingIfNeeded(ctx, rayJobInstance); shouldUpdate {
 			break
 		}
 
-		if shouldUpdate := r.checkActiveDeadlineAndUpdateStatusIfNeeded(ctx, rayJobInstance); shouldUpdate {
+		if shouldUpdate := checkActiveDeadlineAndUpdateStatusIfNeeded(ctx, rayJobInstance); shouldUpdate {
 			break
 		}
 
@@ -215,11 +213,11 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 		rayJobInstance.Status.JobId = rayJobInstance.Spec.JobId
 		rayJobInstance.Status.JobDeploymentStatus = rayv1.JobDeploymentStatusRunning
 	case rayv1.JobDeploymentStatusRunning:
-		if shouldUpdate := r.updateStatusToSuspendingIfNeeded(ctx, rayJobInstance); shouldUpdate {
+		if shouldUpdate := updateStatusToSuspendingIfNeeded(ctx, rayJobInstance); shouldUpdate {
 			break
 		}
 
-		if shouldUpdate := r.checkActiveDeadlineAndUpdateStatusIfNeeded(ctx, rayJobInstance); shouldUpdate {
+		if shouldUpdate := checkActiveDeadlineAndUpdateStatusIfNeeded(ctx, rayJobInstance); shouldUpdate {
 			break
 		}
 
@@ -235,7 +233,7 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 				logger.Error(err, "Failed to get the submitter Kubernetes Job for RayJob", "NamespacedName", namespacedName)
 				return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 			}
-			if shouldUpdate := r.checkK8sJobAndUpdateStatusIfNeeded(ctx, rayJobInstance, job); shouldUpdate {
+			if shouldUpdate := checkK8sJobAndUpdateStatusIfNeeded(ctx, rayJobInstance, job); shouldUpdate {
 				break
 			}
 		}
@@ -346,19 +344,47 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 		return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, nil
 	case rayv1.JobDeploymentStatusComplete, rayv1.JobDeploymentStatusFailed:
 		// If this RayJob uses an existing RayCluster (i.e., ClusterSelector is set), we should not delete the RayCluster.
-		logger.Info(string(rayJobInstance.Status.JobDeploymentStatus), "RayJob", rayJobInstance.Name, "ShutdownAfterJobFinishes", rayJobInstance.Spec.ShutdownAfterJobFinishes, "ClusterSelector", rayJobInstance.Spec.ClusterSelector)
-		if rayJobInstance.Spec.ShutdownAfterJobFinishes && len(rayJobInstance.Spec.ClusterSelector) == 0 {
-			ttlSeconds := rayJobInstance.Spec.TTLSecondsAfterFinished
-			nowTime := time.Now()
-			shutdownTime := rayJobInstance.Status.EndTime.Add(time.Duration(ttlSeconds) * time.Second)
-			logger.Info(
-				"RayJob deployment status",
-				"jobDeploymentStatus", rayJobInstance.Status.JobDeploymentStatus,
-				"shutdownAfterJobFinishes", rayJobInstance.Spec.ShutdownAfterJobFinishes,
-				"ttlSecondsAfterFinished", ttlSeconds,
-				"Status.endTime", rayJobInstance.Status.EndTime,
-				"Now", nowTime,
-				"ShutdownTime", shutdownTime)
+		ttlSeconds := rayJobInstance.Spec.TTLSecondsAfterFinished
+		nowTime := time.Now()
+		shutdownTime := rayJobInstance.Status.EndTime.Add(time.Duration(ttlSeconds) * time.Second)
+		logger.Info(string(rayJobInstance.Status.JobDeploymentStatus),
+			"ShutdownAfterJobFinishes", rayJobInstance.Spec.ShutdownAfterJobFinishes,
+			"ClusterSelector", rayJobInstance.Spec.ClusterSelector,
+			"ttlSecondsAfterFinished", ttlSeconds,
+			"Status.endTime", rayJobInstance.Status.EndTime,
+			"Now", nowTime,
+			"ShutdownTime", shutdownTime)
+
+		if features.Enabled(features.RayJobDeletionPolicy) &&
+			rayJobInstance.Spec.DeletionPolicy != nil &&
+			*rayJobInstance.Spec.DeletionPolicy != rayv1.DeleteNoneDeletionPolicy &&
+			len(rayJobInstance.Spec.ClusterSelector) == 0 {
+			logger.Info("Shutdown behavior is defined by the deletion policy", "deletionPolicy", rayJobInstance.Spec.DeletionPolicy)
+			if shutdownTime.After(nowTime) {
+				delta := int32(time.Until(shutdownTime.Add(2 * time.Second)).Seconds())
+				logger.Info("shutdownTime not reached, requeue this RayJob for n seconds", "seconds", delta)
+				return ctrl.Result{RequeueAfter: time.Duration(delta) * time.Second}, nil
+			}
+
+			switch *rayJobInstance.Spec.DeletionPolicy {
+			case rayv1.DeleteClusterDeletionPolicy:
+				logger.Info("Deleting RayCluster", "RayCluster", rayJobInstance.Status.RayClusterName)
+				_, err = r.deleteClusterResources(ctx, rayJobInstance)
+			case rayv1.DeleteWorkersDeletionPolicy:
+				logger.Info("Suspending all worker groups", "RayCluster", rayJobInstance.Status.RayClusterName)
+				err = r.suspendWorkerGroups(ctx, rayJobInstance)
+			case rayv1.DeleteSelfDeletionPolicy:
+				logger.Info("Deleting RayJob")
+				err = r.Client.Delete(ctx, rayJobInstance)
+			default:
+			}
+			if err != nil {
+				return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
+			}
+		}
+
+		if (!features.Enabled(features.RayJobDeletionPolicy) || rayJobInstance.Spec.DeletionPolicy == nil) && rayJobInstance.Spec.ShutdownAfterJobFinishes && len(rayJobInstance.Spec.ClusterSelector) == 0 {
+			logger.Info("Shutdown behavior is defined by the `ShutdownAfterJobFinishes` flag", "shutdownAfterJobFinishes", rayJobInstance.Spec.ShutdownAfterJobFinishes)
 			if shutdownTime.After(nowTime) {
 				delta := int32(time.Until(shutdownTime.Add(2 * time.Second)).Seconds())
 				logger.Info("shutdownTime not reached, requeue this RayJob for n seconds", "seconds", delta)
@@ -377,6 +403,7 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 				return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 			}
 		}
+
 		// If the RayJob is completed, we should not requeue it.
 		return ctrl.Result{}, nil
 	default:
@@ -443,7 +470,7 @@ func (r *RayJobReconciler) createK8sJobIfNeed(ctx context.Context, rayJobInstanc
 	namespacedName := common.RayJobK8sJobNamespacedName(rayJobInstance)
 	if err := r.Client.Get(ctx, namespacedName, job); err != nil {
 		if errors.IsNotFound(err) {
-			submitterTemplate, err := r.getSubmitterTemplate(ctx, rayJobInstance, rayClusterInstance)
+			submitterTemplate, err := getSubmitterTemplate(ctx, rayJobInstance, rayClusterInstance)
 			if err != nil {
 				return err
 			}
@@ -457,7 +484,7 @@ func (r *RayJobReconciler) createK8sJobIfNeed(ctx context.Context, rayJobInstanc
 }
 
 // getSubmitterTemplate builds the submitter pod template for the Ray job.
-func (r *RayJobReconciler) getSubmitterTemplate(ctx context.Context, rayJobInstance *rayv1.RayJob, rayClusterInstance *rayv1.RayCluster) (corev1.PodTemplateSpec, error) {
+func getSubmitterTemplate(ctx context.Context, rayJobInstance *rayv1.RayJob, rayClusterInstance *rayv1.RayCluster) (corev1.PodTemplateSpec, error) {
 	logger := ctrl.LoggerFrom(ctx)
 	var submitterTemplate corev1.PodTemplateSpec
 
@@ -617,6 +644,33 @@ func (r *RayJobReconciler) deleteClusterResources(ctx context.Context, rayJobIns
 	return isClusterDeleted, nil
 }
 
+func (r *RayJobReconciler) suspendWorkerGroups(ctx context.Context, rayJobInstance *rayv1.RayJob) error {
+	logger := ctrl.LoggerFrom(ctx)
+	clusterIdentifier := common.RayJobRayClusterNamespacedName(rayJobInstance)
+
+	cluster := rayv1.RayCluster{}
+	if err := r.Get(ctx, clusterIdentifier, &cluster); err != nil {
+		return err
+	}
+
+	for i := range cluster.Spec.WorkerGroupSpecs {
+		cluster.Spec.WorkerGroupSpecs[i].Suspend = ptr.To[bool](true)
+	}
+
+	if err := r.Update(ctx, &cluster); err != nil {
+		r.Recorder.Eventf(rayJobInstance, corev1.EventTypeWarning,
+			string(utils.FailedToUpdateRayCluster),
+			"Failed to suspend worker groups in cluster %s/%s: %v",
+			cluster.Namespace, cluster.Name, err)
+		return err
+	}
+
+	logger.Info("All worker groups for RayCluster have had `suspend` set to true", "RayCluster", clusterIdentifier)
+	r.Recorder.Eventf(rayJobInstance, corev1.EventTypeNormal, string(utils.UpdatedRayCluster), "Set the `suspend` field to true for all worker groups in cluster %s/%s", cluster.Namespace, cluster.Name)
+
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RayJobReconciler) SetupWithManager(mgr ctrl.Manager, reconcileConcurrency int) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -641,7 +695,7 @@ func (r *RayJobReconciler) SetupWithManager(mgr ctrl.Manager, reconcileConcurren
 // prior to job submissions and RayCluster creations. This is used to avoid duplicate job submissions and cluster creations. In addition, this
 // function also sets `Status.StartTime` to support `ActiveDeadlineSeconds`.
 // This function will set or generate JobId if SubmissionMode is not InteractiveMode.
-func (r *RayJobReconciler) initRayJobStatusIfNeed(ctx context.Context, rayJob *rayv1.RayJob) error {
+func initRayJobStatusIfNeed(ctx context.Context, rayJob *rayv1.RayJob) error {
 	logger := ctrl.LoggerFrom(ctx)
 	shouldUpdateStatus := rayJob.Status.JobId == "" || rayJob.Status.RayClusterName == "" || rayJob.Status.JobStatus == ""
 	// Please don't update `shouldUpdateStatus` below.
@@ -768,7 +822,7 @@ func (r *RayJobReconciler) constructRayClusterForRayJob(rayJobInstance *rayv1.Ra
 	return rayCluster, nil
 }
 
-func (r *RayJobReconciler) updateStatusToSuspendingIfNeeded(ctx context.Context, rayJob *rayv1.RayJob) bool {
+func updateStatusToSuspendingIfNeeded(ctx context.Context, rayJob *rayv1.RayJob) bool {
 	logger := ctrl.LoggerFrom(ctx)
 	if !rayJob.Spec.Suspend {
 		return false
@@ -787,7 +841,7 @@ func (r *RayJobReconciler) updateStatusToSuspendingIfNeeded(ctx context.Context,
 	return true
 }
 
-func (r *RayJobReconciler) checkK8sJobAndUpdateStatusIfNeeded(ctx context.Context, rayJob *rayv1.RayJob, job *batchv1.Job) bool {
+func checkK8sJobAndUpdateStatusIfNeeded(ctx context.Context, rayJob *rayv1.RayJob, job *batchv1.Job) bool {
 	logger := ctrl.LoggerFrom(ctx)
 	for _, cond := range job.Status.Conditions {
 		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
@@ -808,7 +862,7 @@ func (r *RayJobReconciler) checkK8sJobAndUpdateStatusIfNeeded(ctx context.Contex
 	return false
 }
 
-func (r *RayJobReconciler) checkActiveDeadlineAndUpdateStatusIfNeeded(ctx context.Context, rayJob *rayv1.RayJob) bool {
+func checkActiveDeadlineAndUpdateStatusIfNeeded(ctx context.Context, rayJob *rayv1.RayJob) bool {
 	logger := ctrl.LoggerFrom(ctx)
 	if rayJob.Spec.ActiveDeadlineSeconds == nil || time.Now().Before(rayJob.Status.StartTime.Add(time.Duration(*rayJob.Spec.ActiveDeadlineSeconds)*time.Second)) {
 		return false
@@ -819,39 +873,4 @@ func (r *RayJobReconciler) checkActiveDeadlineAndUpdateStatusIfNeeded(ctx contex
 	rayJob.Status.Reason = rayv1.DeadlineExceeded
 	rayJob.Status.Message = fmt.Sprintf("The RayJob has passed the activeDeadlineSeconds. StartTime: %v. ActiveDeadlineSeconds: %d", rayJob.Status.StartTime, *rayJob.Spec.ActiveDeadlineSeconds)
 	return true
-}
-
-func validateRayJobSpec(rayJob *rayv1.RayJob) error {
-	// KubeRay has some limitations for the suspend operation. The limitations are a subset of the limitations of
-	// Kueue (https://kueue.sigs.k8s.io/docs/tasks/run_rayjobs/#c-limitations). For example, KubeRay allows users
-	// to suspend a RayJob with autoscaling enabled, but Kueue doesn't.
-	if rayJob.Spec.Suspend && !rayJob.Spec.ShutdownAfterJobFinishes {
-		return fmt.Errorf("a RayJob with shutdownAfterJobFinishes set to false is not allowed to be suspended")
-	}
-	if rayJob.Spec.Suspend && len(rayJob.Spec.ClusterSelector) != 0 {
-		return fmt.Errorf("the ClusterSelector mode doesn't support the suspend operation")
-	}
-	if rayJob.Spec.RayClusterSpec == nil && len(rayJob.Spec.ClusterSelector) == 0 {
-		return fmt.Errorf("one of RayClusterSpec or ClusterSelector must be set")
-	}
-	// Validate whether RuntimeEnvYAML is a valid YAML string. Note that this only checks its validity
-	// as a YAML string, not its adherence to the runtime environment schema.
-	if _, err := utils.UnmarshalRuntimeEnvYAML(rayJob.Spec.RuntimeEnvYAML); err != nil {
-		return err
-	}
-	if rayJob.Spec.ActiveDeadlineSeconds != nil && *rayJob.Spec.ActiveDeadlineSeconds <= 0 {
-		return fmt.Errorf("activeDeadlineSeconds must be a positive integer")
-	}
-	if rayJob.Spec.BackoffLimit != nil && *rayJob.Spec.BackoffLimit < 0 {
-		return fmt.Errorf("backoffLimit must be a positive integer")
-	}
-	return nil
-}
-
-func validateRayJobStatus(rayJob *rayv1.RayJob) error {
-	if rayJob.Status.JobDeploymentStatus == rayv1.JobDeploymentStatusWaiting && rayJob.Spec.SubmissionMode != rayv1.InteractiveMode {
-		return fmt.Errorf("invalid RayJob State: JobDeploymentStatus cannot be `Waiting` when SubmissionMode is not InteractiveMode")
-	}
-
-	return nil
 }

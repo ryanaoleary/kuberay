@@ -513,6 +513,57 @@ func TestGetWorkerGroupDesiredReplicas(t *testing.T) {
 	workerGroupSpec.MinReplicas = &maxReplicas
 	workerGroupSpec.MaxReplicas = &minReplicas
 	assert.Equal(t, GetWorkerGroupDesiredReplicas(ctx, workerGroupSpec), *workerGroupSpec.MaxReplicas)
+
+	// Test 6: `WorkerGroupSpec.Suspend` is true.
+	suspend := true
+	workerGroupSpec.MinReplicas = &maxReplicas
+	workerGroupSpec.MaxReplicas = &minReplicas
+	workerGroupSpec.Suspend = &suspend
+	assert.Equal(t, GetWorkerGroupDesiredReplicas(ctx, workerGroupSpec), int32(0))
+}
+
+func TestCalculateMinReplicas(t *testing.T) {
+	// Test 1
+	minReplicas := int32(1)
+	rayCluster := &rayv1.RayCluster{
+		Spec: rayv1.RayClusterSpec{
+			WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+				{
+					MinReplicas: &minReplicas,
+				},
+			},
+		},
+	}
+	assert.Equal(t, CalculateMinReplicas(rayCluster), minReplicas)
+
+	// Test 2
+	suspend := true
+	for i := range rayCluster.Spec.WorkerGroupSpecs {
+		rayCluster.Spec.WorkerGroupSpecs[i].Suspend = &suspend
+	}
+	assert.Equal(t, CalculateMinReplicas(rayCluster), int32(0))
+}
+
+func TestCalculateMaxReplicas(t *testing.T) {
+	// Test 1
+	maxReplicas := int32(1)
+	rayCluster := &rayv1.RayCluster{
+		Spec: rayv1.RayClusterSpec{
+			WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+				{
+					MaxReplicas: &maxReplicas,
+				},
+			},
+		},
+	}
+	assert.Equal(t, CalculateMaxReplicas(rayCluster), maxReplicas)
+
+	// Test 2
+	suspend := true
+	for i := range rayCluster.Spec.WorkerGroupSpecs {
+		rayCluster.Spec.WorkerGroupSpecs[i].Suspend = &suspend
+	}
+	assert.Equal(t, CalculateMaxReplicas(rayCluster), int32(0))
 }
 
 func TestCalculateDesiredReplicas(t *testing.T) {
@@ -663,16 +714,108 @@ func TestErrRayClusterReplicaFailureReason(t *testing.T) {
 	assert.Equal(t, RayClusterReplicaFailureReason(errors.New("other error")), "")
 }
 
-func TestUpsertEnvVar(t *testing.T) {
-	envs := []corev1.EnvVar{
-		{Name: "1", Value: "a"},
-		{Name: "1", Value: "b"},
+func TestIsAutoscalingEnabled(t *testing.T) {
+	// Test: RayCluster
+	cluster := &rayv1.RayCluster{}
+	assert.False(t, IsAutoscalingEnabled(cluster))
+
+	cluster = &rayv1.RayCluster{
+		Spec: rayv1.RayClusterSpec{
+			EnableInTreeAutoscaling: ptr.To[bool](true),
+		},
 	}
-	envs = UpsertEnvVar(envs, corev1.EnvVar{Name: "1", Value: "c"})
-	envs = UpsertEnvVar(envs, corev1.EnvVar{Name: "2", Value: "d"})
-	assert.Equal(t, []corev1.EnvVar{
-		{Name: "1", Value: "c"},
-		{Name: "1", Value: "c"},
-		{Name: "2", Value: "d"},
-	}, envs)
+	assert.True(t, IsAutoscalingEnabled(cluster))
+
+	// Test: RayJob
+	job := &rayv1.RayJob{}
+	assert.False(t, IsAutoscalingEnabled(job))
+
+	job = &rayv1.RayJob{
+		Spec: rayv1.RayJobSpec{
+			RayClusterSpec: &rayv1.RayClusterSpec{
+				EnableInTreeAutoscaling: ptr.To[bool](true),
+			},
+		},
+	}
+	assert.True(t, IsAutoscalingEnabled(job))
+
+	// Test: RayService
+	service := &rayv1.RayService{}
+	assert.False(t, IsAutoscalingEnabled(service))
+
+	service = &rayv1.RayService{
+		Spec: rayv1.RayServiceSpec{
+			RayClusterSpec: rayv1.RayClusterSpec{
+				EnableInTreeAutoscaling: ptr.To[bool](true),
+			},
+		},
+	}
+	assert.True(t, IsAutoscalingEnabled(service))
+}
+
+func TestIsGCSFaultToleranceEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		instance rayv1.RayCluster
+		expected bool
+	}{
+		{
+			name: "ray.io/ft-enabled is true",
+			instance: rayv1.RayCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						RayFTEnabledAnnotationKey: "true",
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "ray.io/ft-enabled is not set and GcsFaultToleranceOptions is set",
+			instance: rayv1.RayCluster{
+				Spec: rayv1.RayClusterSpec{
+					GcsFaultToleranceOptions: &rayv1.GcsFaultToleranceOptions{},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "ray.io/ft-enabled is false",
+			instance: rayv1.RayCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						RayFTEnabledAnnotationKey: "false",
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "ray.io/ft-enabled is not set and GcsFaultToleranceOptions is not set",
+			instance: rayv1.RayCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "ray.io/ft-enabled is using uppercase true",
+			instance: rayv1.RayCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						RayFTEnabledAnnotationKey: "TRUE",
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := IsGCSFaultToleranceEnabled(test.instance)
+			assert.Equal(t, test.expected, result)
+		})
+	}
 }
